@@ -4,6 +4,7 @@ from enum import Enum, auto
 from types import SimpleNamespace, FrameType, ModuleType
 from typing import List
 from bdb import BdbQuit
+from inspect import currentframe
 
 import cadquery as cq
 from PyQt5 import QtCore
@@ -14,6 +15,7 @@ from logbook import info
 from path import Path
 from pyqtgraph.parametertree import Parameter
 from spyder.utils.icon_manager import icon
+from random import randrange as rrr,seed
 
 from ..cq_utils import find_cq_objects, reload_cq
 from ..mixins import ComponentMixin
@@ -164,15 +166,23 @@ class Debugger(QObject,ComponentMixin):
     def get_current_script(self):
 
         return self.parent().components['editor'].get_text_with_eol()
+    
+    def get_current_script_path(self):
+        
+        filename = self.parent().components["editor"].filename
+        if filename:
+            return Path(filename).absolute()
 
     def get_breakpoints(self):
 
         return self.parent().components['editor'].debugger.get_breakpoints()
 
-    def compile_code(self, cq_script):
+    def compile_code(self, cq_script, cq_script_path=None):
 
         try:
             module = ModuleType('__cq_main__')
+            if cq_script_path:
+                module.__dict__["__file__"] = cq_script_path
             cq_code = compile(cq_script, DUMMY_FILE, 'exec')
             return cq_code, module
         except Exception:
@@ -182,8 +192,7 @@ class Debugger(QObject,ComponentMixin):
     def _exec(self, code, locals_dict, globals_dict):
 
         with ExitStack() as stack:
-            fname = self.parent().components['editor'].filename
-            p = Path(fname if fname else '').abspath().dirname()
+            p = (self.get_current_script_path() or Path("")).absolute().dirname()
 
             if self.preferences['Add script dir to path'] and p.exists():
                 sys.path.insert(0,p)
@@ -195,6 +204,26 @@ class Debugger(QObject,ComponentMixin):
 
             exec(code, locals_dict, globals_dict)
 
+    @staticmethod
+    def _rand_color(alpha = 0., cfloat=False):
+        #helper function to generate a random color dict
+        #for CQ-editor's show_object function
+        lower = 10
+        upper = 100 #not too high to keep color brightness in check
+        if cfloat: #for two output types depending on need
+            return (
+                    (rrr(lower,upper)/255),
+                    (rrr(lower,upper)/255),
+                    (rrr(lower,upper)/255),
+                    alpha,
+                    )
+        return {"alpha": alpha,
+                "color": (
+                          rrr(lower,upper),
+                          rrr(lower,upper),
+                          rrr(lower,upper),
+                         )}
+
     def _inject_locals(self,module):
 
         cq_objects = {}
@@ -204,7 +233,17 @@ class Debugger(QObject,ComponentMixin):
             if name:
                 cq_objects.update({name : SimpleNamespace(shape=obj,options=options)})
             else:
-                cq_objects.update({str(id(obj)) : SimpleNamespace(shape=obj,options=options)})
+                #get locals of the enclosing scope
+                d = currentframe().f_back.f_locals
+
+                #try to find the name
+                try:
+                    name = list(d.keys())[list(d.values()).index(obj)]
+                except ValueError:
+                    #use id if not found
+                    name = str(id(obj))
+
+                cq_objects.update({name : SimpleNamespace(shape=obj,options=options)})
 
         def _debug(obj,name=None):
 
@@ -212,6 +251,7 @@ class Debugger(QObject,ComponentMixin):
 
         module.__dict__['show_object'] = _show_object
         module.__dict__['debug'] = _debug
+        module.__dict__['rand_color'] = self._rand_color
         module.__dict__['log'] = lambda x: info(str(x))
         module.__dict__['cq'] = cq
 
@@ -224,11 +264,13 @@ class Debugger(QObject,ComponentMixin):
     @pyqtSlot(bool)
     def render(self):
 
+        seed(59798267586177)
         if self.preferences['Reload CQ']:
             reload_cq()
 
         cq_script = self.get_current_script()
-        cq_code,module = self.compile_code(cq_script)
+        cq_script_path = self.get_current_script_path()
+        cq_code,module = self.compile_code(cq_script, cq_script_path)
 
         if cq_code is None: return
 
@@ -269,7 +311,8 @@ class Debugger(QObject,ComponentMixin):
             self.state = DbgState.STEP
 
             self.script = self.get_current_script()
-            code,module = self.compile_code(self.script)
+            cq_script_path = self.get_current_script_path()
+            code,module = self.compile_code(self.script, cq_script_path)
 
             if code is None:
                 self.sigDebugging.emit(False)
